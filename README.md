@@ -6,6 +6,39 @@
 Rustls is a modern TLS library written in Rust.
 </p>
 
+# About this fork
+
+This is a fork of [rustls](https://github.com/rustls/rustls) made for
+[vproxy](https://github.com/maxeliseyev/vless-proxy), a terminal VLESS client
+written in Rust. The branch `reality-0.23` tracks the upstream `0.23.x` release
+line and carries a single, small patch:
+
+- a public trait `rustls::client::ClientHelloSessionIdHook` and an optional
+  field `ClientConfig::session_id_hook`.
+
+**Why.** The [REALITY](https://github.com/XTLS/REALITY) protocol authenticates a
+client inside an otherwise ordinary TLS 1.3 handshake: the 32-byte legacy
+`session_id` of the ClientHello carries an AES-GCM-sealed token (version,
+timestamp, short id) under a key derived from the client's X25519 key share and
+the server's REALITY public key, with the rest of the ClientHello bound as AEAD
+additional data. Stock rustls fills that field with random bytes and gives the
+application no way to see the encoded hello before it is sent, so a REALITY
+client cannot be built on top of it without this hook. Go clients use uTLS for
+the same purpose; this patch is the minimal rustls equivalent.
+
+**What the hook does.** It runs once per connection, for the initial
+ClientHello only (not after a HelloRetryRequest, and not when resuming a
+session). It receives the client random, the public key of the offered key
+share and the fully encoded ClientHello with its session id zeroed, and returns
+the session id to send. When the hook is `None` rustls behaves exactly as
+upstream. Everything else (key share secret, certificate verification) is done
+by the application through the existing `CryptoProvider` and
+`ServerCertVerifier` extension points, so the patch stays at ~75 lines.
+
+**Maintenance.** The branch is rebased onto upstream `v/0.23.x` tags as needed.
+vproxy pins a specific commit of this branch in its `[patch.crates-io]`.
+Upstream `main` of this fork is left untouched.
+
 # Status
 
 Rustls is used in production at many organizations and projects. We aim to maintain
