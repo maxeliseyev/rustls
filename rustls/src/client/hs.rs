@@ -27,6 +27,7 @@ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
+use crate::msgs::codec::Codec;
 use crate::msgs::enums::{Compression, ExtensionType};
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientExtensionsInput, ClientHelloPayload,
@@ -447,6 +448,37 @@ fn emit_client_hello_for_retry(
     input.hello.offered_cipher_suites = chp_payload.cipher_suites.clone();
 
     let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
+
+    // Let the application replace the legacy session id of the initial
+    // ClientHello (e.g. REALITY authentication). Skipped on retry so the
+    // second hello echoes the first one's session id, and skipped when
+    // resuming because the PSK binder would be computed over a stale hello.
+    if let (Some(hook), None, None) = (
+        config.session_id_hook.as_ref(),
+        retryreq,
+        tls13_session.as_ref(),
+    ) {
+        if let HandshakePayload::ClientHello(payload) = &mut chp.0 {
+            payload.session_id = SessionId::from_bytes32([0u8; 32]);
+        }
+        let zeroed = chp.get_encoding();
+        let chosen = hook.session_id(
+            &input.random.0,
+            key_share
+                .as_ref()
+                .map(|share| share.pub_key()),
+            &zeroed,
+        );
+        let session_id = match chosen {
+            Some(bytes) => SessionId::from_bytes32(bytes),
+            None => input.session_id,
+        };
+        if let HandshakePayload::ClientHello(payload) = &mut chp.0 {
+            payload.session_id = session_id;
+        }
+        // A HelloRetryRequest must echo what we actually sent.
+        input.session_id = session_id;
+    }
 
     let tls13_early_data_key_schedule = match (ech_state.as_mut(), tls13_session) {
         // If we're performing ECH and resuming, then the PSK binder will have been dealt with

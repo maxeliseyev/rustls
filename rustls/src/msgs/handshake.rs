@@ -180,6 +180,11 @@ impl SessionId {
         }
     }
 
+    /// A full-length (32 byte) session id with caller-chosen contents.
+    pub(crate) fn from_bytes32(data: [u8; 32]) -> Self {
+        Self { data, len: 32 }
+    }
+
     #[cfg(feature = "tls12")]
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
