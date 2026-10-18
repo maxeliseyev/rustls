@@ -11,10 +11,12 @@ Rustls is a modern TLS library written in Rust.
 This is a fork of [rustls](https://github.com/rustls/rustls) made for
 [vproxy](https://github.com/maxeliseyev/vless-proxy), a terminal VLESS client
 written in Rust. The branch `reality-0.23` tracks the upstream `0.23.x` release
-line and carries a single, small patch:
+line and carries two small patches:
 
 - a public trait `rustls::client::ClientHelloSessionIdHook` and an optional
-  field `ClientConfig::session_id_hook`.
+  field `ClientConfig::session_id_hook` (REALITY authentication);
+- a public trait `rustls::client::ClientHelloRewriter` and an optional field
+  `ClientConfig::client_hello_rewriter` (TLS fingerprint imitation).
 
 **Why.** The [REALITY](https://github.com/XTLS/REALITY) protocol authenticates a
 client inside an otherwise ordinary TLS 1.3 handshake: the 32-byte legacy
@@ -34,6 +36,21 @@ the session id to send. When the hook is `None` rustls behaves exactly as
 upstream. Everything else (key share secret, certificate verification) is done
 by the application through the existing `CryptoProvider` and
 `ServerCertVerifier` extension points, so the patch stays at ~75 lines.
+
+**The rewriter.** Censorship systems fingerprint TLS clients by the shape of
+their ClientHello (JA3/JA4), and rustls's hello is easy to tell from a
+browser's. The rewriter receives the fully encoded ClientHello and returns the
+bytes to send instead; they go on the wire and into the handshake transcript.
+rustls re-reads the offered cipher suites and extension types from the result,
+so server replies to added extensions (ALPS, GREASE ECH) are not rejected as
+unsolicited, and an added GREASE ECH switches the ECH status to "grease". The
+rewriter must keep the random, session id and key shares; it may add cipher
+suites and extensions rustls does not implement, which servers are expected not
+to select. It runs for the initial hello and the one after a HelloRetryRequest,
+never when resuming (the PSK binder covers the exact bytes), and before the
+session id hook. vproxy uses it to imitate Chrome (uTLS `HelloChrome_133`);
+rustls upstream deliberately does not advertise what it does not implement,
+which is why this lives in a fork.
 
 **Maintenance.** The branch is rebased onto upstream `v/0.23.x` tags as needed.
 vproxy pins a specific commit of this branch in its `[patch.crates-io]`.
