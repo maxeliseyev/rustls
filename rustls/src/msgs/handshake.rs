@@ -1761,8 +1761,13 @@ impl<'a> Codec<'a> for CertificateExtensions<'a> {
         let mut sub = r.sub(len)?;
 
         while sub.any_left() {
-            out.read_one(&mut sub, |_unk| {
-                Err(InvalidMessage::UnknownCertificateExtension)
+            out.read_one(&mut sub, |unk| match unk {
+                // A Chrome-shaped ClientHello (`client_hello_rewriter`) offers
+                // signed_certificate_timestamp; a server may answer it here.
+                // The timestamps are not checked, like a browser without CT
+                // enforcement, and must not fail the handshake.
+                ExtensionType::SCT => Ok(()),
+                _ => Err(InvalidMessage::UnknownCertificateExtension),
             })?;
         }
 

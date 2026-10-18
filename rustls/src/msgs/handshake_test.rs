@@ -155,6 +155,27 @@ fn refuses_certificate_ext_with_unknown_type() {
 }
 
 #[test]
+fn ignores_certificate_ext_sct() {
+    // signed_certificate_timestamp (18) with a 3-byte body, then status_request.
+    let bytes = [
+        0x00u8, 0x10, 0x00, 0x12, 0x00, 0x03, 0xaa, 0xbb, 0xcc, 0x00, 0x05, 0x00, 0x05, 0x01,
+        0x00, 0x00, 0x01, 0xcc,
+    ];
+    let ext = CertificateExtensions::read_bytes(&bytes).unwrap();
+    assert!(ext.status.is_some());
+}
+
+#[test]
+fn refuses_certificate_ext_with_unknown_type_other_than_sct() {
+    // extension 0x0099 is not SCT and not status_request.
+    let bytes = [0x00u8, 0x07, 0x00, 0x99, 0x00, 0x03, 0xaa, 0xbb, 0xcc];
+    assert_eq!(
+        CertificateExtensions::read_bytes(&bytes).unwrap_err(),
+        InvalidMessage::UnknownCertificateExtension
+    );
+}
+
+#[test]
 fn refuses_certificate_req_ext_with_unparsed_bytes() {
     let bytes = [
         0x00u8, 0x09, 0x00, 0x0d, 0x00, 0x05, 0x00, 0x02, 0x01, 0x02, 0xff,
