@@ -1767,6 +1767,11 @@ impl<'a> Codec<'a> for CertificateExtensions<'a> {
                 // The timestamps are not checked, like a browser without CT
                 // enforcement, and must not fail the handshake.
                 ExtensionType::SCT => Ok(()),
+                // The same hello (Chrome 155 profile) offers trust_anchors
+                // (draft-ietf-tls-trust-anchor-ids, 0xca34); a server that
+                // picked its chain by it echoes the chosen ID here. The chain
+                // is still verified against the configured roots.
+                ExtensionType::Unknown(TRUST_ANCHORS_EXTENSION) => Ok(()),
                 _ => Err(InvalidMessage::UnknownCertificateExtension),
             })?;
         }
@@ -1774,6 +1779,9 @@ impl<'a> Codec<'a> for CertificateExtensions<'a> {
         Ok(out)
     }
 }
+
+/// `trust_anchors` extension code point (draft-ietf-tls-trust-anchor-ids).
+const TRUST_ANCHORS_EXTENSION: u16 = 0xca34;
 
 #[derive(Debug)]
 pub(crate) struct CertificateEntry<'a> {

@@ -166,6 +166,17 @@ fn ignores_certificate_ext_sct() {
 }
 
 #[test]
+fn ignores_certificate_ext_trust_anchors() {
+    // trust_anchors (0xca34) carrying one 4-byte ID, then status_request.
+    let bytes = [
+        0x00u8, 0x13, 0xca, 0x34, 0x00, 0x06, 0x00, 0x04, 0xd6, 0x79, 0x09, 0x01, 0x00, 0x05, 0x00,
+        0x05, 0x01, 0x00, 0x00, 0x01, 0xcc,
+    ];
+    let ext = CertificateExtensions::read_bytes(&bytes).unwrap();
+    assert!(ext.status.is_some());
+}
+
+#[test]
 fn refuses_certificate_ext_with_unknown_type_other_than_sct() {
     // extension 0x0099 is not SCT and not status_request.
     let bytes = [0x00u8, 0x07, 0x00, 0x99, 0x00, 0x03, 0xaa, 0xbb, 0xcc];
