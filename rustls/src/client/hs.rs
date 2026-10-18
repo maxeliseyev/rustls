@@ -25,9 +25,9 @@ use crate::enums::{
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
-use crate::log::{debug, trace};
+use crate::log::{debug, trace, warn};
 use crate::msgs::base::Payload;
-use crate::msgs::codec::Codec;
+use crate::msgs::codec::{Codec, Reader, u24};
 use crate::msgs::enums::{Compression, ExtensionType};
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientExtensionsInput, ClientHelloPayload,
@@ -449,6 +449,33 @@ fn emit_client_hello_for_retry(
 
     let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
 
+    // Let the application reshape the encoded hello (TLS fingerprint
+    // imitation). Not when resuming: the PSK binder covers the exact bytes.
+    let mut custom_encoding: Option<Vec<u8>> = None;
+    if let (Some(rewriter), None) = (
+        config.client_hello_rewriter.as_ref(),
+        tls13_session.as_ref(),
+    ) {
+        let original = chp.get_encoding();
+        if let Some(rewritten) = rewriter.rewrite(&original, retryreq.is_some()) {
+            if let Some((suites, ext_types)) = scan_client_hello(&rewritten) {
+                input.hello.offered_cipher_suites = suites;
+                if ext_types.contains(&ExtensionType::EncryptedClientHello)
+                    && cx.data.ech_status == EchStatus::NotOffered
+                {
+                    // An added GREASE ECH: ignore retry configs like for our own GREASE.
+                    cx.data.ech_status = EchStatus::Grease;
+                }
+                input.hello.sent_extensions = ext_types;
+                custom_encoding = Some(rewritten);
+            } else {
+                warn!(
+                    "client_hello_rewriter returned an unparsable ClientHello; sending the original"
+                );
+            }
+        }
+    }
+
     // Let the application replace the legacy session id of the initial
     // ClientHello (e.g. REALITY authentication). Skipped on retry so the
     // second hello echoes the first one's session id, and skipped when
@@ -458,10 +485,20 @@ fn emit_client_hello_for_retry(
         retryreq,
         tls13_session.as_ref(),
     ) {
-        if let HandshakePayload::ClientHello(payload) = &mut chp.0 {
-            payload.session_id = SessionId::from_bytes32([0u8; 32]);
+        // ClientHello body: header(4) version(2) random(32) sid_len(1) sid(32)
+        const SID: core::ops::Range<usize> = 39..71;
+        let mut zeroed = match &custom_encoding {
+            Some(bytes) => bytes.clone(),
+            None => {
+                if let HandshakePayload::ClientHello(payload) = &mut chp.0 {
+                    payload.session_id = SessionId::from_bytes32([0u8; 32]);
+                }
+                chp.get_encoding()
+            }
+        };
+        if zeroed.len() >= SID.end && zeroed[38] == 32 {
+            zeroed[SID].fill(0);
         }
-        let zeroed = chp.get_encoding();
         let chosen = hook.session_id(
             &input.random.0,
             key_share
@@ -475,6 +512,11 @@ fn emit_client_hello_for_retry(
         };
         if let HandshakePayload::ClientHello(payload) = &mut chp.0 {
             payload.session_id = session_id;
+        }
+        if let Some(bytes) = custom_encoding.as_mut() {
+            if bytes.len() >= SID.end && bytes[38] == 32 {
+                bytes[SID].copy_from_slice(session_id.as_ref());
+            }
         }
         // A HelloRetryRequest must echo what we actually sent.
         input.session_id = session_id;
@@ -512,7 +554,13 @@ fn emit_client_hello_for_retry(
             // (retryreq == None means we're in the "initial ClientHello" case)
             None => ProtocolVersion::TLSv1_0,
         },
-        payload: MessagePayload::handshake(chp),
+        payload: match custom_encoding {
+            Some(encoded) => MessagePayload::Handshake {
+                parsed: chp,
+                encoded: Payload::new(encoded),
+            },
+            None => MessagePayload::handshake(chp),
+        },
     };
 
     if retryreq.is_some() {
@@ -1234,4 +1282,38 @@ impl Deref for ClientSessionValue {
     fn deref(&self) -> &Self::Target {
         self.common()
     }
+}
+
+/// Cipher suites and extension types of an encoded ClientHello handshake
+/// message (with its 4-byte header), or `None` if it does not parse.
+fn scan_client_hello(bytes: &[u8]) -> Option<(Vec<CipherSuite>, Vec<ExtensionType>)> {
+    let mut r = Reader::init(bytes);
+    let typ = u8::read(&mut r).ok()?;
+    if typ != u8::from(HandshakeType::ClientHello) {
+        return None;
+    }
+    let len = u24::read(&mut r).ok()?;
+    let mut r = r.sub(len.0 as usize).ok()?;
+    r.take(2 + 32)?; // version, random
+    let sid_len = u8::read(&mut r).ok()? as usize;
+    r.take(sid_len)?;
+    let suites_len = u16::read(&mut r).ok()? as usize;
+    let mut suites_reader = r.sub(suites_len).ok()?;
+    let mut suites = Vec::with_capacity(suites_len / 2);
+    while suites_reader.any_left() {
+        suites.push(CipherSuite::read(&mut suites_reader).ok()?);
+    }
+    let comp_len = u8::read(&mut r).ok()? as usize;
+    r.take(comp_len)?;
+    let mut types = Vec::new();
+    if r.any_left() {
+        let exts_len = u16::read(&mut r).ok()? as usize;
+        let mut exts = r.sub(exts_len).ok()?;
+        while exts.any_left() {
+            types.push(ExtensionType::read(&mut exts).ok()?);
+            let ext_len = u16::read(&mut exts).ok()? as usize;
+            exts.take(ext_len)?;
+        }
+    }
+    Some((suites, types))
 }

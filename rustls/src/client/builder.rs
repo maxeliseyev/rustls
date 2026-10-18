@@ -187,6 +187,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             ech_mode: self.state.client_ech_mode,
             send_ticket_request: None,
             session_id_hook: None,
+            client_hello_rewriter: None,
         }
     }
 }

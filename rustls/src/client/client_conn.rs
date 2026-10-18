@@ -132,6 +132,55 @@ pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
     fn has_certs(&self) -> bool;
 }
 
+/// A hook that chooses the `legacy_session_id` sent in the initial ClientHello.
+///
+/// TLS 1.3 clients send a random 32-byte session id purely for middlebox
+/// compatibility (RFC 8446 appendix D.4). Protocols such as REALITY hide an
+/// authenticator in that field instead. This hook is invoked once per
+/// connection, for the first ClientHello only (not after a HelloRetryRequest),
+/// and only when no session resumption is attempted.
+pub trait ClientHelloSessionIdHook: fmt::Debug + Send + Sync {
+    /// Compute the session id to send.
+    ///
+    /// * `client_random` is the ClientHello `random` field.
+    /// * `key_share_public` is the public key of the (first) `key_share`
+    ///   entry offered, if any.
+    /// * `raw_client_hello` is the complete encoded ClientHello handshake
+    ///   message (including the 4-byte handshake header) exactly as it will
+    ///   be sent, except that the session id bytes are all zero.
+    ///
+    /// Return `None` to keep the random session id.
+    fn session_id(
+        &self,
+        client_random: &[u8; 32],
+        key_share_public: Option<&[u8]>,
+        raw_client_hello: &[u8],
+    ) -> Option<[u8; 32]>;
+}
+
+/// Rewrites the encoded ClientHello before it is sent, e.g. to imitate a
+/// browser's TLS fingerprint (cipher suite list, extension set and order,
+/// GREASE values).
+///
+/// The rewriter receives the complete encoded ClientHello handshake message
+/// (4-byte handshake header included) and returns the replacement, or `None`
+/// to send the original. The replacement must keep the `random` and
+/// `session_id` fields and the key shares as they are; it may add cipher
+/// suites and extensions the library does not implement (the server is
+/// expected not to select them) and reorder extensions freely, except that
+/// `pre_shared_key` must stay last.
+///
+/// The rewritten bytes are what goes on the wire and into the transcript. The
+/// set of offered cipher suites and extension types is re-read from them, so
+/// server replies to added extensions are not treated as unsolicited. A
+/// rewrite is applied to the initial ClientHello and to the one following a
+/// HelloRetryRequest (`retry` tells them apart), but never when resuming a
+/// session, because the PSK binder would no longer match.
+pub trait ClientHelloRewriter: fmt::Debug + Send + Sync {
+    /// Return the ClientHello to send instead of `raw_client_hello`.
+    fn rewrite(&self, raw_client_hello: &[u8], retry: bool) -> Option<Vec<u8>>;
+}
+
 /// Common configuration for (typically) all connections made by a program.
 ///
 /// Making one of these is cheap, though one of the inputs may be expensive: gathering trust roots
@@ -160,33 +209,6 @@ pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
 /// * [`ClientConfig::cert_compression_cache`]: caches the most recently used 4 compressions
 ///
 /// [`RootCertStore`]: crate::RootCertStore
-
-/// A hook that chooses the `legacy_session_id` sent in the initial ClientHello.
-///
-/// TLS 1.3 clients send a random 32-byte session id purely for middlebox
-/// compatibility (RFC 8446 appendix D.4). Protocols such as REALITY hide an
-/// authenticator in that field instead. This hook is invoked once per
-/// connection, for the first ClientHello only (not after a HelloRetryRequest),
-/// and only when no session resumption is attempted.
-pub trait ClientHelloSessionIdHook: fmt::Debug + Send + Sync {
-    /// Compute the session id to send.
-    ///
-    /// * `client_random` is the ClientHello `random` field.
-    /// * `key_share_public` is the public key of the (first) `key_share`
-    ///   entry offered, if any.
-    /// * `raw_client_hello` is the complete encoded ClientHello handshake
-    ///   message (including the 4-byte handshake header) exactly as it will
-    ///   be sent, except that the session id bytes are all zero.
-    ///
-    /// Return `None` to keep the random session id.
-    fn session_id(
-        &self,
-        client_random: &[u8; 32],
-        key_share_public: Option<&[u8]>,
-        raw_client_hello: &[u8],
-    ) -> Option<[u8; 32]>;
-}
-
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     /// Which ALPN protocols we include in our client hello.
@@ -320,6 +342,11 @@ pub struct ClientConfig {
     ///
     /// The default is `None`: a random 32-byte session id is sent.
     pub session_id_hook: Option<Arc<dyn ClientHelloSessionIdHook>>,
+
+    /// Optional hook rewriting the encoded ClientHello (fingerprint
+    /// imitation). See [`ClientHelloRewriter`]. Applied before
+    /// `session_id_hook`.
+    pub client_hello_rewriter: Option<Arc<dyn ClientHelloRewriter>>,
 
     /// Request a specific number of TLS 1.3 session tickets via [RFC 9149].
     ///
